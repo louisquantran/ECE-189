@@ -13,10 +13,10 @@ module fifo #(
   output logic empty
 );
 
-  T               mem [DEPTH];          // 0..DEPTH-1
-  logic [3:0]  w_ptr, r_ptr;         // address pointers
-  logic [3:0]    ctr;                  // 0..DEPTH
-  T               r_data_q;
+  T              mem [DEPTH];          
+  logic [3:0]    w_ptr, r_ptr;     
+  logic [3:0]    ctr;                 
+  T              r_data_q;
 
   assign read_data = r_data_q;
   assign full  = (ctr == DEPTH);
@@ -31,23 +31,29 @@ module fifo #(
     end else begin
       automatic logic do_write = write_en;           
       automatic logic do_read  = read_en && (ctr!=0); 
+      
       if (do_write && (ctr == DEPTH) && !do_read) begin
         r_ptr <= (r_ptr + 1) % DEPTH;
       end
+      
       if (do_read) begin
         r_data_q <= mem[r_ptr];
         r_ptr    <= (r_ptr + 1) % DEPTH;
       end
+      
       if (do_write) begin
         mem[w_ptr] <= write_data;
         w_ptr      <= (w_ptr + 1) % DEPTH;
       end
-
-      unique case ({do_write, do_read})
-        2'b10: if (ctr < DEPTH) ctr <= ctr + 1'b1;
-        2'b01:               ctr <= ctr - 1'b1;    
-        default:             ctr <= ctr;          
-      endcase
+      
+      if (do_write && !do_read) begin
+        ctr <= ctr + 1;
+      end else if (!do_write && do_read) begin
+        ctr <= ctr - 1;
+      end else if (do_write && do_read) begin
+        ctr <= ctr;
+      end
+      
     end
   end
 endmodule
