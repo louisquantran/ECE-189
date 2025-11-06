@@ -19,54 +19,41 @@
 // 
 //////////////////////////////////////////////////////////////////////////////////
 
+import types_pkg::*;
 
 module Fetch(
     input logic clk,
     input logic reset,
     
-    // Downstream    
-    input logic [31:0] PC_in,
+    // Upstrea  
+    input logic [31:0] pc_in,
     
-    // Upstream
-    input logic ready_in,
-    output logic [31:0] instr_out,
-    output logic [31:0] PC_out,
-    output logic [31:0] PC_4,
+    // Downstream
+    input logic ready_out,
     output logic valid_out,
+    output fetch_data data_out
 );
-    logic [31:0] PC_buf;
-    logic [31:0] instr_buf;
-    logic valid_out_buf;
-    logic [31:0] PC_icache;
+    logic [31:0] pc_icache;
     logic [31:0] instr_icache;
-    
+        
     // Call ICache
     ICache ICache_dut (
         .clk(clk),
         .reset(reset),
-        .address(PC_in),
+        .address(pc_icache),
         .instruction(instr_icache)
     );
     
-    // Combinational assignments
-    assign PC_out = PC_buf;
-    assign PC_4 = PC_buf + 32'd4;
-    assign valid_out = valid_out_buf;
-    assign instr_out = instr_buf;
-    
-    // Sequential assignments
-    always_ff @(posedge clk) begin
+//     Sequential assignments
+    always_ff @(posedge clk or posedge reset) begin
         if (reset) begin
-            valid_out_buf <= 1'b0;  
-            instr_buf <= 32'b0;
-            PC_buf <= 32'b0;
+            data_out.instr <= 32'b0;
+            data_out.pc <= 32'b0;
         end else begin
-            PC_icache <= PC_in;
-            if (!valid_out_buf || ready_in) begin
-                valid_out_buf <= 1'b1;
-                PC_buf <= PC_icache;
-                instr_buf <= instr_icache;
-            end
+            pc_icache <= pc_in;
+            data_out.pc <= pc_icache;
+            data_out.instr <= instr_icache;
+            valid_out <= 1'b1;
         end
     end
 endmodule
