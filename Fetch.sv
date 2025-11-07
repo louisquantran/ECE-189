@@ -21,11 +21,8 @@
 
 import types_pkg::*;
 
-module Fetch(
-    input logic clk,
-    input logic reset,
-    
-    // Upstrea  
+module fetch(
+    // Upstream
     input logic [31:0] pc_in,
     
     // Downstream
@@ -33,27 +30,16 @@ module Fetch(
     output logic valid_out,
     output fetch_data data_out
 );
-    logic [31:0] pc_icache;
     logic [31:0] instr_icache;
         
     // Call ICache
-    ICache ICache_dut (
-        .clk(clk),
-        .reset(reset),
-        .address(pc_icache),
+    i_cache i_cache_dut (
+        .address(pc_in),
         .instruction(instr_icache)
     );
     
-//     Sequential assignments
-    always_ff @(posedge clk or posedge reset) begin
-        if (reset) begin
-            data_out.instr <= 32'b0;
-            data_out.pc <= 32'b0;
-        end else begin
-            pc_icache <= pc_in;
-            data_out.pc <= pc_icache;
-            data_out.instr <= instr_icache;
-            valid_out <= 1'b1;
-        end
-    end
+    assign data_out.pc = pc_in; 
+    assign data_out.pc_4 = pc_in + 4;
+    assign data_out.instr = instr_icache;
+    assign valid_out = 1'b1;
 endmodule
