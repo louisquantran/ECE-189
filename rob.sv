@@ -6,7 +6,6 @@ module rob (
     
     // from rename stage
     input  logic write_en,
-    input  logic [4:0] rob_tag_in,
     input  logic [7:0] pd_new_in,
     input  logic [7:0] pd_old_in,
     input logic [31:0] pc_in,
@@ -16,89 +15,82 @@ module rob (
     input logic [4:0] rob_fu,
     input logic mispredict,
     input logic branch,
+    input logic [4:0] mispredict_tag,
     
-    // upstream
-    output logic rob_tag_out,
+    // Update RS
+    output logic [4:0] rob_tag_out,
     output logic valid_retired,
+    // Update FU availability
     output logic complete_out,
+
     output logic full,
     output logic empty
 );
-    logic advance;
     rob_data rob_table[0:15];
-    rob_data re_rob_table[0:15];   
     
     logic [4:0]  w_ptr, r_ptr;      
     logic [4:0]  ctr;            
     
-    assign full  = (ctr == 16);
+    assign full = (ctr == 16); 
     assign empty = (ctr == 0);
     
     logic do_write;           
-    logic do_read;
+    logic do_retire;
     
-    assign do_read = advance && (ctr!=0);
-    assign do_write = write_en;
-    assign complete_out = complete_in;
-    assign rob_table[rob_fu].complete = complete_in;
-    
+    assign do_retire = rob_table[r_ptr].complete && rob_table[r_ptr].valid;
+    assign do_write = write_en && !full;
+    assign complete_out = rob_table[r_ptr].complete;
+
     always_ff @(posedge clk) begin
         if (reset) begin
             w_ptr    <= '0;
             r_ptr    <= '0;
             ctr      <= '0;
-            advance <= '0;
             for (int i = 0; i < 16; i++) begin
-                rob_table[i].pd_new = '0;
-                rob_table[i].pd_old = '0;
-                rob_table[i].pc = '0;
-                rob_table[i].complete = '0;
-                rob_table[i].rob_tag = '0;
-                rob_table[i].valid = '0;
+                rob_table[i] = '0;
             end
         end else begin
-            // inform reservation station an instruction is retired, 
-            // also reset that row in the table, advance r_ptr by 1
-            if (rob_table[r_ptr].complete) begin
-                advance <= 1'b1;
-                rob_tag_out <= r_ptr;
-                rob_table[r_ptr].pd_new <= '0;
-                rob_table[r_ptr].pd_old <= '0;
-                rob_table[r_ptr].pc = '0;
-                rob_table[r_ptr].complete <= '0;
-                rob_table[r_ptr].rob_tag <= '0;
-                rob_table[r_ptr].valid <= '0; 
-            end else begin
-                // don't advance if not retired yet
-                advance <= 1'b0;
+            valid_retired <= 1'b0;
+            if (complete_in && rob_table[rob_fu].valid) begin
+                rob_table[rob_fu].complete <= 1'b1;
             end
             if (mispredict) begin
-                rob_table <= re_rob_table;
+                automatic logic [4:0] old_w      = w_ptr;              // snapshot tail
+                automatic logic [4:0] branch_idx = mispredict_tag;     // snapshot branch
+                automatic logic [4:0] start      = (branch_idx==15)?0:branch_idx+1;  // branch+1
+                automatic logic [4:0] newcnt = (start >= r_ptr) ? (start - r_ptr) : (5'd16 - r_ptr + start);
+        
+                for (int k=0, logic [4:0] i=start; (i!=old_w)&&(k<16); i=(i==15)?0:i+1, k++) begin
+                    rob_table[i] <= '0;
+                end
+                
+                w_ptr <= start;
+                ctr <= newcnt;
             end
-            if (do_write && (ctr == 16) && !do_read) begin
-                r_ptr <= (r_ptr + 1) % 16;
+            else begin
+                // inform reservation station an instruction is retired, 
+                // also reset that row in the table, advance r_ptr by 1
+                if (do_retire) begin
+                    rob_tag_out <= r_ptr;
+                    valid_retired <= 1'b1;
+                    rob_table[r_ptr] <= '0;
+                    r_ptr <= (r_ptr == 5'd15) ? 5'b0 : r_ptr + 1;
+                end
+                if (do_write) begin
+                    rob_table[w_ptr].pd_new <= pd_new_in;
+                    rob_table[w_ptr].pd_old <= pd_old_in;
+                    rob_table[w_ptr].pc <= pc_in;
+                    rob_table[w_ptr].complete <= 1'b0;
+                    rob_table[w_ptr].valid <= 1'b1;
+                    rob_table[w_ptr].rob_index <= w_ptr;
+                    w_ptr <= (w_ptr == 5'd15) ? 5'b0 : w_ptr + 1;
+                end
+                unique case ({do_retire, do_write})
+                  2'b10: ctr <= ctr - 5'd1; 
+                  2'b01: ctr <= ctr + 5'd1; 
+                  default: ctr <= ctr;   
+                endcase
             end
-            if (do_read) begin
-                r_ptr    <= (r_ptr + 1) % 16;
-            end
-            if (branch) begin
-                re_rob_table <= rob_table;
-            end
-            if (do_write) begin
-                rob_table[rob_tag_in].pd_new <= pd_new_in;
-                rob_table[rob_tag_in].pd_old <= pd_old_in;
-                rob_table[rob_tag_in].pc <= pc_in;
-                rob_table[rob_tag_in].complete <= 1'b0;
-                rob_table[rob_tag_in].valid <= 1'b1;
-                rob_table[rob_tag_in].rob_index <= rob_tag_in;
-                w_ptr      <= (w_ptr + 1) % 16;
-            end
-            
-            unique case ({do_write, do_read})
-                2'b10: if (ctr < 16) ctr <= ctr + 1'b1;
-                2'b01: ctr <= ctr - 1'b1;    
-                default: ctr <= ctr;          
-            endcase 
         end
     end
 endmodule
