@@ -1,0 +1,309 @@
+`timescale 1ns / 1ps
+import types_pkg::*;
+
+module res_station_tb;
+
+    // Clock / reset
+    logic clk;
+    logic reset;
+
+    // DUT inputs
+    rename_data r_data_tb;
+    logic [1:0] fu_in_tb;
+    logic [6:0] Opcode_tb;
+
+    logic       mispredict_tb;
+    logic [4:0] mispredict_tag_tb;
+    logic [6:0] ps_in_tb;      // 7 bits to match DUT
+    logic       ps_ready_tb;
+    logic       fu_ready_tb;
+
+    logic [4:0] rob_index_in_tb;
+    logic       di_en_tb;
+
+    logic preg_rtable_tb [0:127];   // operand-ready table
+
+    // DUT outputs
+    logic   fu_dispatched_tb;
+    logic   full_tb;
+    rs_data data_out_tb;
+
+    // Instantiate DUT (matches your latest res_station)
+    res_station dut (
+        .clk           (clk),
+        .reset         (reset),
+        .r_data        (r_data_tb),
+        .fu_in         (fu_in_tb),
+        .Opcode        (Opcode_tb),
+        .mispredict    (mispredict_tb),
+        .mispredict_tag(mispredict_tag_tb),
+        .ps_in         (ps_in_tb),
+        .ps_ready      (ps_ready_tb),
+        .fu_ready  (fu_ready_tb),
+        .rob_index_in  (rob_index_in_tb),
+        .di_en         (di_en_tb),
+        .preg_rtable   (preg_rtable_tb),
+        .fu_dispatched (fu_dispatched_tb),
+        .full          (full_tb),
+        .data_out      (data_out_tb)
+    );
+
+    // Clock generation: 100 MHz
+    initial clk = 0;
+    always #5 clk = ~clk;
+
+    // Simple RS dump helper (hierarchical access to rs_table inside DUT)
+    task automatic dump_rs(input string tag);
+        $display("-------- RS dump (%s) @ time %0t --------", tag, $time);
+        for (int i = 0; i < 8; i++) begin
+            $display("RS[%0d]: valid=%0b ready=%0b rob=%0d ps1=%0d ps1_r=%0b ps2=%0d ps2_r=%0b pd=%0d",
+                     i,
+                     dut.rs_table[i].valid,
+                     dut.rs_table[i].ready,
+                     dut.rs_table[i].rob_index,
+                     dut.rs_table[i].ps1,
+                     dut.rs_table[i].ps1_ready,
+                     dut.rs_table[i].ps2,
+                     dut.rs_table[i].ps2_ready,
+                     dut.rs_table[i].pd);
+        end
+        $display("-------------------------------------------");
+    endtask
+
+    // Apply reset
+    task automatic apply_reset();
+        begin
+            reset            = 1'b1;
+            mispredict_tb    = 1'b0;
+            mispredict_tag_tb= '0;
+            ps_ready_tb      = 1'b0;
+            fu_ready_tb  = 1'b0;
+            di_en_tb         = 1'b0;
+            fu_in_tb         = '0;
+            Opcode_tb        = '0;
+            rob_index_in_tb  = '0;
+            ps_in_tb         = '0;
+
+            // Clear tables
+            for (int i = 0; i < 128; i++) preg_rtable_tb[i] = 1'b0;
+
+            // Hold reset for a few cycles
+            repeat (4) @(posedge clk);
+            reset = 1'b0;
+            @(posedge clk);
+        end
+    endtask
+
+    // Dispatch one instruction into RS
+    task automatic dispatch_instr(
+        input [6:0] ps1,
+        input [6:0] ps2,
+        input [6:0] pd,
+        input [4:0] rob_index,
+        input       ps1_ready_init,
+        input       ps2_ready_init,
+        input [1:0] fu_id
+    );
+        begin
+            // Set rename_data fields
+            r_data_tb.ps1     = ps1;
+            r_data_tb.ps2     = ps2;
+            r_data_tb.pd_new  = pd;
+            r_data_tb.imm     = 33'h0_DEAD_BEEF; // imm is 33 bits in typedef
+            r_data_tb.pd_old  = 7'h00;           // not used here
+            r_data_tb.rob_tag = rob_index;       // if used elsewhere
+
+            Opcode_tb       = 7'b0110011;        // R-type
+            rob_index_in_tb = rob_index;
+            fu_in_tb        = fu_id;
+
+            // Initialize operand-ready table (sampled at dispatch)
+            preg_rtable_tb[ps1] = ps1_ready_init;
+            preg_rtable_tb[ps2] = ps2_ready_init;
+
+            di_en_tb = 1'b1;
+            @(posedge clk);
+            di_en_tb = 1'b0;
+            @(posedge clk); // allow RS to update
+        end
+    endtask
+
+    // Broadcast a ps on the "CDB"
+    task automatic broadcast_ps(input [6:0] ps);
+        begin
+            ps_in_tb    = ps;
+            ps_ready_tb = 1'b1;
+            @(posedge clk);
+            ps_ready_tb = 1'b0;
+            @(posedge clk);
+        end
+    endtask
+
+    // FU requests an instruction (one-cycle pulse on fu_ready)
+    task automatic mark_fu_ready();
+        begin
+            fu_ready_tb = 1'b1;
+            @(posedge clk);
+            fu_ready_tb = 1'b0;
+            @(posedge clk);
+        end
+    endtask
+
+    initial begin
+        $display("Starting res_station_tb");
+        
+        // TEST 1: basic dispatch + wakeup
+        apply_reset();
+        dump_rs("after reset");
+
+        $display("\n TEST 1: two instructions, second depends on ps=13 ");
+
+        // I0: rob_index = 3, ps1=10, ps2=11, pd=20, operands ready
+        dispatch_instr(7'd10, 7'd11, 7'd20, 5'd3,
+                       /*ps1_ready_init*/ 1'b1,
+                       /*ps2_ready_init*/ 1'b1,
+                       /*fu_id*/          2'd0);
+
+        // I1: rob_index = 5, ps1=12, ps2=13, ps2 not ready yet
+        dispatch_instr(7'd12, 7'd13, 7'd21, 5'd5,
+                       /*ps1_ready_init*/ 1'b1,
+                       /*ps2_ready_init*/ 1'b0,
+                       /*fu_id*/          2'd0);
+
+        dump_rs("after two dispatches");
+
+        // Now broadcast ps2 for I1 (ps = 13)
+        $display("\nBroadcasting ps=13 to wake up I1");
+        broadcast_ps(7'd13);
+        dump_rs("after ps broadcast");
+
+        // TEST 2: No issue when FU doesn't request (fu_ready=0)
+
+        $display("\nTEST 2: no issue when FU does not request");
+        // RS currently has entries; fu_ready stays 0.
+        repeat (5) @(posedge clk);
+        dump_rs("after 5 cycles with fu_ready=0");
+
+        if (dut.rs_table[0].valid !== 1'b1 ||
+            dut.rs_table[1].valid !== 1'b1)
+            $error("TEST 2 FAILED: some entries were cleared even though fu_ready=0");
+        else
+            $display("TEST 2 OK: no entries cleared when fu_ready=0 (time=%0t)", $time);
+
+        $display("\nTEST 3: issue when only younger is ready");
+        apply_reset();   // start clean
+
+        // I0 (older): rob=3, ps2 not ready -> not issueable
+        dispatch_instr(7'd10, 7'd30, 7'd40, 5'd3,
+                       /*ps1_ready_init*/ 1'b1,
+                       /*ps2_ready_init*/ 1'b0,
+                       /*fu_id*/          2'd0);
+
+        // I1 (younger): rob=5, fully ready (operands)
+        dispatch_instr(7'd12, 7'd13, 7'd41, 5'd5,
+                       /*ps1_ready_init*/ 1'b1,
+                       /*ps2_ready_init*/ 1'b1,
+                       /*fu_id*/          2'd0);
+
+        dump_rs("before issue (older not ready, younger ready)");
+
+        // FU requests an instruction
+        mark_fu_ready();
+        dump_rs("after one issue request (FU)");
+
+        // Oldest READY is RS[1] (I1), RS[0] is not ready
+        if (dut.rs_table[0].valid !== 1'b1)
+            $error("TEST 3 FAILED: older non-ready entry (RS[0]) should remain valid.");
+        else
+            $display("TEST 3 OK: older non-ready entry still valid (time=%0t)", $time);
+
+        if (dut.rs_table[1].valid !== 1'b0)
+            $error("TEST 3 FAILED: younger ready entry (RS[1]) should have been issued and cleared.");
+        else
+            $display("TEST 3 OK: younger ready entry cleared on issue (time=%0t)", $time);
+
+        // TEST 5: Full behavior (8 entries)
+        $display("\n=== TEST 5: full behavior (8 entries) ===");
+        apply_reset();
+
+        // Fill all 8 entries (FU not requesting, so nothing issues)
+        for (int i = 0; i < 8; i++) begin
+            dispatch_instr(
+                7'd10 + i,      // ps1
+                7'd20 + i,      // ps2
+                7'd30 + i,      // pd
+                i[4:0],         // rob_index
+                1'b1,           // ps1_ready_init
+                1'b1,           // ps2_ready_init
+                2'd0            // fu_id
+            );
+        end
+
+        dump_rs("after filling 8 entries");
+
+        if (full_tb !== 1'b1)
+            $error("TEST 5 FAILED: full should be 1 when all 8 entries are valid.");
+        else
+            $display("TEST 5 OK: full asserted with 8 valid entries (time=%0t)", $time);
+
+        // Attempt one more dispatch; should not corrupt existing entries
+        $display("Attempting to dispatch when full...");
+        dispatch_instr(7'd99, 7'd98, 7'd97, 5'd15,
+                       1'b1, 1'b1, 2'd0);
+        dump_rs("after extra dispatch attempt while full");
+
+        // Simple check: first entry should still be whatever it was
+        if (dut.rs_table[0].ps1 == 7'd10 &&
+            dut.rs_table[0].pd  == 7'd30)
+            $display("TEST 5 OK: entries not corrupted by extra dispatch while full (time=%0t)", $time);
+        else
+            $error("TEST 5 FAILED: RS[0] appears corrupted by dispatch when full.");
+
+        // TEST 6: CDB wakeup with multiple dependents
+        $display("\n=== TEST 6: CDB wakeup with multiple dependents ===");
+        apply_reset();
+
+        // ps1 initially NOT ready, ps2 ready
+        preg_rtable_tb[30] = 1'b0;  // producer of ps1 not done yet
+        preg_rtable_tb[40] = 1'b1;
+        preg_rtable_tb[41] = 1'b1;
+        preg_rtable_tb[42] = 1'b1;
+
+        // Three entries depending on ps1=30
+        dispatch_instr(7'd30, 7'd40, 7'd60, 5'd1,
+                       /*ps1_ready_init*/ 1'b0,
+                       /*ps2_ready_init*/ 1'b1,
+                       /*fu_id*/          2'd0);
+
+        dispatch_instr(7'd30, 7'd41, 7'd61, 5'd2,
+                       1'b0, 1'b1, 2'd0);
+
+        dispatch_instr(7'd30, 7'd42, 7'd62, 5'd3,
+                       1'b0, 1'b1, 2'd0);
+
+        dump_rs("before CDB broadcast (all waiting on ps1=30)");
+
+        // Now producer of ps1=30 completes and broadcasts on CDB
+        $display("Broadcasting ps=30 (CDB) to wake all dependents");
+        broadcast_ps(7'd30);
+        dump_rs("after CDB broadcast ps=30");
+
+        mark_fu_ready();
+        dump_rs("after CDB broadcast + FU request");
+
+        // Check: all entries with ps1=30 should have ps1_ready=1
+        for (int i = 0; i < 3; i++) begin
+            if (dut.rs_table[i].ps1 == 7'd30) begin
+                if (!dut.rs_table[i].ps1_ready)
+                    $error("TEST 6 FAILED: RS[%0d] did not set ps1_ready after CDB broadcast.", i);
+            end
+        end
+        $display("TEST 6: CDB multiple dependents check done (time=%0t)", $time);
+
+        // Done
+        #100;
+        $display("All tests finished.");
+        $finish;
+    end
+
+endmodule
